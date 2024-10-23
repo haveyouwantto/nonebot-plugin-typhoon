@@ -99,84 +99,98 @@ class TyphoonForecast:
         return self.__repr__()
 
 
-def create_typhoon(_id):
-    data = get_typhoon_data(_id)
-    name = data[0]["name"]["en"]
-    current = TyphoonStatus(
-        data[1]["position"]["deg"][0],
-        data[1]["position"]["deg"][1],
-        data[1]["category"]["en"],
-        data[1]["maximumWind"]["sustained"]["m/s"],
-        data[1]["maximumWind"]["gust"]["m/s"],
-        data[1]["pressure"],
-        data[1]["speed"]["km/h"],
-    )
 
-    typhoon = Typhoon(_id, name, data[0]["issue"]["UTC"], current)
 
-    for forecast in data[2:]:
-        typhoon.forecast.append(
-            TyphoonForecast(
-                forecast["advancedHours"],
-                TyphoonStatus(
-                    forecast["position"]["deg"][0],
-                    forecast["position"]["deg"][1],
-                    forecast["category"]["en"],
-                    forecast["maximumWind"]["sustained"]["m/s"],
-                    forecast["maximumWind"]["gust"]["m/s"],
-                    forecast["pressure"],
-                    # forecast["speed"]["km/h"],
-                ),
-            )
+class TyphoonAdapter:
+    def get_typhoon_list(self) -> List['Typhoon']:
+        """Method to be overridden by adapters for fetching the list of typhoons."""
+        raise NotImplementedError("This method should be overridden by subclasses")
+
+    def get_typhoon(self, _id: str) -> 'Typhoon':
+        """Method to be overridden by adapters for fetching a specific typhoon by ID."""
+        raise NotImplementedError("This method should be overridden by subclasses")
+
+
+
+class JMAAdapter(TyphoonAdapter):
+    BASE_URL = "https://www.jma.go.jp/bosai/typhoon/data/"
+
+    def get_typhoon_list(self) -> List['Typhoon']:
+        # Fetch the list of typhoons from JMA API
+        response = requests.get(f"{self.BASE_URL}targetTc.json")
+        typhoon_list_data = response.json()
+
+        # Create a list to hold Typhoon objects
+        typhoon_list = []
+
+        # Loop through each typhoon in the list and fetch its detailed data
+        for ty in typhoon_list_data:
+            typhoon_id = ty["tropicalCyclone"]
+
+            # Create a Typhoon object using helper method
+            typhoon = self.get_typhoon(typhoon_id)  # Reuse the get_typhoon method
+            typhoon_list.append(typhoon)
+
+        return typhoon_list
+
+    def get_typhoon(self, _id: str) -> 'Typhoon':
+        # Fetch detailed typhoon data using JMA API
+        typhoon_data = self._get_typhoon_data(_id)
+        name = typhoon_data[0]["name"]["en"]
+        current_status = TyphoonStatus(
+            typhoon_data[1]["position"]["deg"][0],
+            typhoon_data[1]["position"]["deg"][1],
+            typhoon_data[1]["category"]["en"],
+            typhoon_data[1]["maximumWind"]["sustained"]["m/s"],
+            typhoon_data[1]["maximumWind"]["gust"]["m/s"],
+            typhoon_data[1]["pressure"],
+            typhoon_data[1]["speed"]["km/h"],
         )
-        
-    typhoon.wind_range = [
-        data[1]["galeWarning"][0]["range"]["km"],
-        data[1]["galeWarning"][1]["range"]["km"],
-    ]
 
-    past = get_past_path_data(_id)
+        # Create a Typhoon object
+        typhoon = Typhoon(_id, name, typhoon_data[0]["issue"]["UTC"], current_status)
 
-    for data in past[1]["track"]["preTyphoon"]:
-        typhoon.pre_typhoon.append(TyphoonStatus(data[0], data[1]))
+        # Append forecast data to the typhoon
+        for forecast in typhoon_data[2:]:
+            typhoon.forecast.append(
+                TyphoonForecast(
+                    forecast["advancedHours"],
+                    TyphoonStatus(
+                        forecast["position"]["deg"][0],
+                        forecast["position"]["deg"][1],
+                        forecast["category"]["en"],
+                        forecast["maximumWind"]["sustained"]["m/s"],
+                        forecast["maximumWind"]["gust"]["m/s"],
+                        forecast["pressure"],
+                    ),
+                )
+            )
 
-    for data in past[1]["track"]["typhoon"]:
-        typhoon.past.append(TyphoonStatus(data[0], data[1]))
+        # Append wind range data
+        typhoon.wind_range = [
+            typhoon_data[1]["galeWarning"][0]["range"]["km"],
+            typhoon_data[1]["galeWarning"][1]["range"]["km"],
+        ]
 
-    return typhoon
+        # Append past path data
+        past_path_data = self._get_past_path_data(_id)
+        for point in past_path_data[1]["track"]["preTyphoon"]:
+            typhoon.pre_typhoon.append(TyphoonStatus(point[0], point[1]))
 
+        for point in past_path_data[1]["track"]["typhoon"]:
+            typhoon.past.append(TyphoonStatus(point[0], point[1]))
 
-def get_all_typhoons():
-    result = []
+        return typhoon
 
-    ty_list = get_typhoon_list()
-    for ty in ty_list:
-        _id = ty["tropicalCyclone"]
+    def _get_typhoon_data(self, name: str):
+        # API call to fetch detailed typhoon data
+        response = requests.get(f"{self.BASE_URL}{name}/specifications.json")
+        return response.json()
 
-        result.append(create_typhoon(_id))
-
-    return result
-
-
-def get_typhoon_list():
-    response = requests.get("https://www.jma.go.jp/bosai/typhoon/data/targetTc.json")
-    return response.json()
-
-
-# Function to get the typhoon data from the JMA API
-def get_typhoon_data(name):
-    response = requests.get(
-        "https://www.jma.go.jp/bosai/typhoon/data/" + name + "/specifications.json"
-    )
-    return response.json()
-
-
-# Function to get the past path data from a hypothetical /pastPath API
-def get_past_path_data(name):
-    response = requests.get(
-        "https://www.jma.go.jp/bosai/typhoon/data/" + name + "/forecast.json"
-    )
-    return response.json()
+    def _get_past_path_data(self, name: str):
+        # API call to fetch past path data
+        response = requests.get(f"{self.BASE_URL}{name}/forecast.json")
+        return response.json()
 
 
 # Plot the typhoon tracks and wind ranges with forecasts
@@ -322,7 +336,8 @@ def plot_typhoons(typhoon: Typhoon, plt, ax):
 
 # Main function to run the whole process
 async def realtime_summary():
-    typhoon_list = get_all_typhoons()
+    adapter = JMAAdapter()
+    typhoon_list = adapter.get_typhoon_list()
     fig = plt.figure(figsize=(10, 6), dpi=300)
     ax = plt.axes(projection=ccrs.PlateCarree())
 
@@ -350,10 +365,9 @@ async def realtime_summary():
 
 
 async def plot_typhoon(_id):
-    typhoon = create_typhoon(_id)
+    adapter = JMAAdapter()
+    typhoon = adapter.get_typhoon(_id)
     
-    
-
     # Extract latitude and longitude for extent setting
     lats = [typhoon.current.lat + point/111 for point in typhoon.wind_range] + [point.lat for point in typhoon.past ] + [point.data.lat for point in typhoon.forecast]
     longs = [typhoon.current.long + point/111 for point in typhoon.wind_range] + [point.long for point in typhoon.past ] +[point.data.long for point in typhoon.forecast]
