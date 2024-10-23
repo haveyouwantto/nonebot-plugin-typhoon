@@ -1,0 +1,4 @@
+nonebot_plugin_session
+nonebot_plugin_alconna
+matplotlib
+cartopy
