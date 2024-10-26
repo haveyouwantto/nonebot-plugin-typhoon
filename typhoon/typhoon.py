@@ -8,19 +8,34 @@ from cartopy.mpl.ticker import LongitudeFormatter, LatitudeFormatter
 import io
 from typing import List
 
+import re
+
 # Define the palette based on the typhoon classification
 palette = {
-    "TD": "limegreen",  # Tropical Depression
+    "TD": "green",  # Tropical Depression
     "TS": "blue",  # Tropical Storm
     "STS": "yellow",  # Severe Tropical Storm
     "TY": "darkorange",  # Typhoon
-    "STY": "violet",  # Severe Typhoon
-    "SuperTY": "red",  # Super Typhoon
+    "STY": "hotpink",  # Severe Typhoon
+    "Super TY": "red",  # Super Typhoon
 }
 
 
 # Importing necessary type hinting
 from typing import List, Optional
+
+
+def extract_match(text):
+    # Define the regex pattern
+    pattern = r"\(([A-Za-z ]+)\)$"
+
+    # Search for the pattern in the input text
+    match = re.search(pattern, text)
+
+    # If a match is found, return the captured group (the uppercase letter)
+    if match:
+        return match.group(1)
+    return None  # Return None if there's no match
 
 
 class Typhoon:
@@ -32,7 +47,6 @@ class Typhoon:
         current,
         pre_typhoon=None,
         past=None,
-        forecast=None,
         wind_range=None,
     ):
         self.id: str = _id
@@ -43,14 +57,13 @@ class Typhoon:
             pre_typhoon if pre_typhoon is not None else []
         )
         self.past: List[TyphoonStatus] = past if past is not None else []
-        self.forecast: List[TyphoonForecast] = forecast if forecast is not None else []
         self.wind_range = wind_range if wind_range is not None else []
 
     def __repr__(self):
         return (
             f"Typhoon(id={self.id!r}, name={self.name!r}, "
             f"current={self.current!r}, pre_typhoon={self.pre_typhoon!r}, "
-            f"past={self.past!r}, forecast={self.forecast!r}, "
+            f"past={self.past!r}, "
             f"wind_range={self.wind_range!r})"
         )
 
@@ -68,6 +81,7 @@ class TyphoonStatus:
         gust=None,
         pressure=None,
         move_speed=None,
+        forecast=None
     ):
         self.lat: float = latitude
         self.long: float = longitude
@@ -75,12 +89,13 @@ class TyphoonStatus:
         self.sus: Optional[float] = sus
         self.gust: Optional[float] = gust
         self.pressure: Optional[float] = pressure
+        self.forecast: Optional[TyphoonForecast] = forecast
 
     def __repr__(self):
         return (
             f"TyphoonStatus(lat={self.lat}, long={self.long}, "
             f"cat={self.cat!r}, sus={self.sus}, gust={self.gust}, "
-            f"pressure={self.pressure})"
+            f"pressure={self.pressure},forecast={self.forecast})"
         )
 
     def __str__(self):
@@ -99,25 +114,22 @@ class TyphoonForecast:
         return self.__repr__()
 
 
-
-
 class TyphoonAdapter:
-    def get_typhoon_list(self) -> List['Typhoon']:
+    def get_typhoon_list(self) -> List["Typhoon"]:
         """Method to be overridden by adapters for fetching the list of typhoons."""
         raise NotImplementedError("This method should be overridden by subclasses")
 
-    def get_typhoon(self, _id: str) -> 'Typhoon':
+    def get_typhoon(self, _id: str) -> "Typhoon":
         """Method to be overridden by adapters for fetching a specific typhoon by ID."""
         raise NotImplementedError("This method should be overridden by subclasses")
 
 
+class CAdapter(TyphoonAdapter):
+    BASE_URL = "https://data.istrongcloud.com/v2/data/complex/"
 
-class JMAAdapter(TyphoonAdapter):
-    BASE_URL = "https://www.jma.go.jp/bosai/typhoon/data/"
-
-    def get_typhoon_list(self) -> List['Typhoon']:
+    def get_typhoon_list(self) -> List["Typhoon"]:
         # Fetch the list of typhoons from JMA API
-        response = requests.get(f"{self.BASE_URL}targetTc.json")
+        response = requests.get(f"{self.BASE_URL}currMerger.json")
         typhoon_list_data = response.json()
 
         # Create a list to hold Typhoon objects
@@ -125,72 +137,76 @@ class JMAAdapter(TyphoonAdapter):
 
         # Loop through each typhoon in the list and fetch its detailed data
         for ty in typhoon_list_data:
-            typhoon_id = ty["tropicalCyclone"]
 
             # Create a Typhoon object using helper method
-            typhoon = self.get_typhoon(typhoon_id)  # Reuse the get_typhoon method
+            typhoon = self.init_typhoon(ty)  # Reuse the get_typhoon method
             typhoon_list.append(typhoon)
 
         return typhoon_list
 
-    def get_typhoon(self, _id: str) -> 'Typhoon':
+    def init_typhoon(self, ty) -> "Typhoon":
         # Fetch detailed typhoon data using JMA API
-        typhoon_data = self._get_typhoon_data(_id)
-        name = typhoon_data[0]["name"]["en"]
+        typhoon_data = ty
+        name = typhoon_data["ename"]
         current_status = TyphoonStatus(
-            typhoon_data[1]["position"]["deg"][0],
-            typhoon_data[1]["position"]["deg"][1],
-            typhoon_data[1]["category"]["en"],
-            typhoon_data[1]["maximumWind"]["sustained"]["m/s"],
-            typhoon_data[1]["maximumWind"]["gust"]["m/s"],
-            typhoon_data[1]["pressure"],
-            typhoon_data[1]["speed"]["km/h"],
+            typhoon_data["points"][-1]["lat"],
+            typhoon_data["points"][-1]["lng"],
+            extract_match(typhoon_data["points"][-1]["strong"]),
+            typhoon_data["points"][-1]["speed"],
+            typhoon_data["points"][-1]["speed"],
+            typhoon_data["points"][-1]["pressure"],
+            typhoon_data["points"][-1]["move_speed"],
         )
 
         # Create a Typhoon object
-        typhoon = Typhoon(_id, name, typhoon_data[0]["issue"]["UTC"], current_status)
-
-        # Append forecast data to the typhoon
-        for forecast in typhoon_data[2:]:
-            typhoon.forecast.append(
-                TyphoonForecast(
-                    forecast["advancedHours"],
-                    TyphoonStatus(
-                        forecast["position"]["deg"][0],
-                        forecast["position"]["deg"][1],
-                        forecast["category"]["en"],
-                        forecast["maximumWind"]["sustained"]["m/s"],
-                        forecast["maximumWind"]["gust"]["m/s"],
-                        forecast["pressure"],
-                    ),
-                )
-            )
+        typhoon = Typhoon(
+            typhoon_data["tfbh"], name, typhoon_data["end_time"], current_status
+        )
 
         # Append wind range data
         typhoon.wind_range = [
-            typhoon_data[1]["galeWarning"][0]["range"]["km"],
-            typhoon_data[1]["galeWarning"][1]["range"]["km"],
+            typhoon_data["points"][-1]["radius7"],
+            typhoon_data["points"][-1]["radius7"],
         ]
 
-        # Append past path data
-        past_path_data = self._get_past_path_data(_id)
-        for point in past_path_data[1]["track"]["preTyphoon"]:
-            typhoon.pre_typhoon.append(TyphoonStatus(point[0], point[1]))
-
-        for point in past_path_data[1]["track"]["typhoon"]:
-            typhoon.past.append(TyphoonStatus(point[0], point[1]))
+        for point in typhoon_data["points"]:
+            status = TyphoonStatus(
+                    point["lat"],
+                    point["lng"],
+                    extract_match(point["strong"]),
+                    point["speed"],
+                    point["speed"],
+                    point["pressure"],
+                )
+            typhoon.past.append(status)
+            if point.get("forecast") is not None:
+                status.forecast = []
+                for forecast in point["forecast"]:
+                    forecast_set = []
+                    for point2 in forecast["points"]:
+                        forecast_set.append(
+                            TyphoonForecast(
+                                point2["time"],
+                                TyphoonStatus(
+                                    point2["lat"],
+                                    point2["lng"],
+                                    extract_match(point2["strong"]),
+                                    point2["speed"],
+                                    point2["speed"],
+                                    point2["pressure"],
+                                ),
+                            )
+                        )
+                    status.forecast.append(forecast_set)
 
         return typhoon
 
-    def _get_typhoon_data(self, name: str):
-        # API call to fetch detailed typhoon data
-        response = requests.get(f"{self.BASE_URL}{name}/specifications.json")
-        return response.json()
+    def get_typhoon(self, _id):
+        lst = self.get_typhoon_list()
 
-    def _get_past_path_data(self, name: str):
-        # API call to fetch past path data
-        response = requests.get(f"{self.BASE_URL}{name}/forecast.json")
-        return response.json()
+        for ty in lst:
+            if ty.id == _id:
+                return ty
 
 
 # Plot the typhoon tracks and wind ranges with forecasts
@@ -269,57 +285,10 @@ def plot_typhoons(typhoon: Typhoon, plt, ax):
         )
         ax.add_patch(semi_circle_south)
 
-    # Plot forecast tracks with dotted lines and markers using the palette
-    for forecast in typhoon.forecast:
-        forecast_lat = forecast.data.lat  # Forecast latitude
-        forecast_lon = forecast.data.long  # Forecast longitude
-        forecast_classification = forecast.data.cat
-         # Get forecast classification (TD, TS, etc.)
-
-        forecast_color = palette.get(
-            forecast_classification, "gray"
-        )  # Get corresponding color for forecast classification
-
-        # Draw dotted line to forecast position
-        ax.plot(
-             [lon, forecast_lon],
-             [lat, forecast_lat],
-             linestyle=":",
-           color=forecast_color,
-         )
-
-        # Plot marker for the forecast position
-        ax.plot(
-            forecast_lon, forecast_lat, marker="x", color=forecast_color, markersize=6
-        )
-        
-        plt.text(forecast_lon, forecast_lat, forecast.hour, fontsize=8, color="black", ha="left")
-
-        # Update current position for the next forecast point
-        lon, lat = forecast_lon, forecast_lat
-
     # Plot the past path using the pastPath API data (assumed to be available)
     if typhoon.past:
         lat, lon = typhoon.past[0].lat, typhoon.past[0].long
         for point in typhoon.past:
-            past_lat = point.lat  # Extract latitudes from past path data
-            past_lon = point.long  # Extract longitudes from past path data
-            
-            # Plot the past path as a solid gray line
-            ax.plot(
-                 [lon, past_lon],
-                 [lat, past_lat],
-                 color="black",
-                 linestyle="-",
-                 linewidth=2,
-             )
-            #ax.plot(past_lon, past_lat, marker="x", color="black", markersize=6)
-
-            lon, lat = past_lon, past_lat
-
-    if typhoon.pre_typhoon:
-        lat, lon = typhoon.pre_typhoon[0].lat, typhoon.pre_typhoon[0].long
-        for point in typhoon.pre_typhoon:
             past_lat = point.lat  # Extract latitudes from past path data
             past_lon = point.long  # Extract longitudes from past path data
 
@@ -327,16 +296,55 @@ def plot_typhoons(typhoon: Typhoon, plt, ax):
             ax.plot(
                 [lon, past_lon],
                 [lat, past_lat],
-                color="black",
-                linestyle=":",
+                color=palette.get(point.cat, "gray"),
+                linestyle="-",
                 linewidth=2,
             )
+            # ax.plot(past_lon, past_lat, marker="x", color="black", markersize=6)
+
             lon, lat = past_lon, past_lat
+
+            if point.forecast is not None:
+                
+                # Plot forecast tracks with dotted lines and markers using the palette
+
+                for forecast_set in point.forecast:
+                    lat2=lat
+                    lon2=lon
+                    for point2 in forecast_set:
+                        forecast_lat = point2.data.lat  # Forecast latitude
+                        forecast_lon = point2.data.long  # Forecast longitude
+                        forecast_classification = point2.data.cat
+                        # Get forecast classification (TD, TS, etc.)
+
+                        forecast_color = palette.get(
+                            forecast_classification, "gray"
+                        )  # Get corresponding color for forecast classification
+
+                        # Draw dotted line to forecast position
+                        ax.plot(
+                            [lon2, forecast_lon],
+                            [lat2, forecast_lat],
+                            linestyle=":",
+                            color=forecast_color,
+                            linewidth=1
+                        )
+
+                        # Plot marker for the forecast position
+                        ax.plot(
+                            forecast_lon, forecast_lat, marker="x", color=forecast_color, markersize=4
+                        )
+
+                        # plt.text(forecast_lon, forecast_lat, forecast.hour, fontsize=8, color="black", ha="left")
+
+                        # Update current position for the next forecast point
+                        lon2, lat2 = forecast_lon, forecast_lat
+
 
 
 # Main function to run the whole process
 async def realtime_summary():
-    adapter = JMAAdapter()
+    adapter = CAdapter()
     typhoon_list = adapter.get_typhoon_list()
     fig = plt.figure(figsize=(10, 6), dpi=300)
     ax = plt.axes(projection=ccrs.PlateCarree())
@@ -365,26 +373,44 @@ async def realtime_summary():
 
 
 async def plot_typhoon(_id):
-    adapter = JMAAdapter()
+    adapter = CAdapter()
     typhoon = adapter.get_typhoon(_id)
-    
+
     # Extract latitude and longitude for extent setting
-    lats = [typhoon.current.lat + point/111 for point in typhoon.wind_range] + [point.lat for point in typhoon.past ] + [point.data.lat for point in typhoon.forecast]
-    longs = [typhoon.current.long + point/111 for point in typhoon.wind_range] + [point.long for point in typhoon.past ] +[point.data.long for point in typhoon.forecast]
+    forecast_points = []
+
+    for point in typhoon.past:
+        if point.forecast is not None:
+            for forecast_set in point.forecast:
+                for point2 in forecast_set:
+                    forecast_points.append(point2.data)
+
+    lats = (
+        [typhoon.current.lat + point / 111 for point in typhoon.wind_range]
+        + [point.lat for point in typhoon.past]
+        + [point.lat for point in forecast_points]
+    )
+    longs = (
+        [typhoon.current.long + point / 111 for point in typhoon.wind_range]
+        + [point.long for point in typhoon.past]
+        + [point.long for point in forecast_points]
+    )
 
     # Set the latitude and longitude range dynamically
-    lat_range = [min(lats) - 5, max(lats) + 5]
-    lon_range = [min(longs) - 5, max(longs) + 5]
+    lat_range = [min(lats) - 2, max(lats) + 2]
+    lon_range = [min(longs) - 2, max(longs) + 2]
 
     fig = plt.figure(figsize=(10, 6), dpi=300)
     ax = plt.axes(projection=ccrs.PlateCarree())
 
     # Add map features
     ax.add_feature(cfeature.OCEAN, edgecolor="gray")
-    
+
     # Set the extent (latitude and longitude limits)
-    
-    ax.set_extent([ lon_range[0], lon_range[1],lat_range[0], lat_range[1]], crs=ccrs.PlateCarree())
+
+    ax.set_extent(
+        [lon_range[0], lon_range[1], lat_range[0], lat_range[1]], crs=ccrs.PlateCarree()
+    )
 
     # Format gridlines
     gl = ax.gridlines(draw_labels=True, crs=ccrs.PlateCarree(), linestyle="--")
@@ -395,7 +421,7 @@ async def plot_typhoon(_id):
     # Plot the typhoon data with forecasts and past path
     plot_typhoons(typhoon, plt, ax)
 
-    plt.title("Typhoon %s | Issued %s" %(typhoon.name, typhoon.issue))
+    plt.title("Typhoon %s | Issued %s" % (typhoon.name, typhoon.issue))
 
     tempfile = io.BytesIO()
     fig.savefig(tempfile, bbox_inches="tight", pad_inches=0.1)
